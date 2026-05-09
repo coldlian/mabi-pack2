@@ -1,14 +1,17 @@
 // main.rs
 
-use clap::{Command, Arg, ArgAction};
 use anyhow::Result;
+use clap::{Arg, ArgAction, Command};
 use std::fs::File as StdFile;
-use std::io::{BufReader as StdBufReader, BufRead};
-use std::path::Path;
 use std::fs::OpenOptions;
+use std::io::{BufRead, BufReader as StdBufReader};
+use std::path::Path;
 
-use simplelog::{CombinedLogger, WriteLogger, TermLogger, LevelFilter, ConfigBuilder, TerminalMode, ColorChoice, SharedLogger};
 use log::{debug, error, info, warn};
+use simplelog::{
+    ColorChoice, CombinedLogger, ConfigBuilder, LevelFilter, SharedLogger, TermLogger,
+    TerminalMode, WriteLogger,
+};
 
 mod common;
 mod encryption;
@@ -17,6 +20,16 @@ mod list;
 mod pack;
 
 const SALTS_URL: &str = "https://shaggyze.website/files/salts.txt";
+const BUILTIN_SALTS: &str = include_str!("builtin_salts.txt");
+
+fn append_salts_from_lines(salts: &mut Vec<String>, content: &str) {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() && !trimmed.starts_with('#') {
+            salts.push(trimmed.to_string());
+        }
+    }
+}
 
 fn load_salts() -> Vec<String> {
     let mut salts = Vec::new();
@@ -28,9 +41,7 @@ fn load_salts() -> Vec<String> {
             let reader = StdBufReader::new(file);
             for line in reader.lines() {
                 if let Ok(salt) = line {
-                    if !salt.trim().is_empty() && !salt.starts_with('#') {
-                        salts.push(salt.trim().to_string());
-                    }
+                    append_salts_from_lines(&mut salts, &salt);
                 }
             }
         }
@@ -47,11 +58,7 @@ fn load_salts() -> Vec<String> {
         Ok(response) => {
             if response.status().is_success() {
                 if let Ok(text) = response.text() {
-                    for line in text.lines() {
-                        if !line.trim().is_empty() && !line.starts_with('#') {
-                            salts.push(line.trim().to_string());
-                        }
-                    }
+                    append_salts_from_lines(&mut salts, &text);
                     if !salts.is_empty() {
                         debug!("Successfully downloaded and loaded {} salts.", salts.len());
                     } else {
@@ -61,19 +68,30 @@ fn load_salts() -> Vec<String> {
                     warn!("Failed to read text from downloaded salts response.");
                 }
             } else {
-                warn!("Failed to download salts: HTTP Status {}", response.status());
+                warn!(
+                    "Failed to download salts: HTTP Status {}",
+                    response.status()
+                );
             }
         }
         Err(e) => {
             warn!("Error downloading salts: {}. Please ensure salts.txt is available locally or network is accessible.", e);
         }
     }
+
+    if salts.is_empty() {
+        warn!("Falling back to built-in salts.");
+        append_salts_from_lines(&mut salts, BUILTIN_SALTS);
+        if !salts.is_empty() {
+            info!("Loaded {} salts from built-in fallback list.", salts.len());
+        }
+    }
+
     if salts.is_empty() {
         error!("No salts loaded! Extraction will likely fail if a key is required and not provided via CLI.");
     }
     salts
 }
-
 
 fn main() {
     let matches = Command::new("Mabinogi pack utilities 2")
@@ -160,34 +178,35 @@ fn main() {
         if let Ok(log_file) = OpenOptions::new().append(true).create(true).open("log.txt") {
             loggers.push(WriteLogger::new(
                 file_log_level,
-                ConfigBuilder::new()
-                    .set_time_format_rfc3339()
-                    .build(),
+                ConfigBuilder::new().set_time_format_rfc3339().build(),
                 log_file,
             ));
         } else {
-             eprintln!("Failed to open log.txt for writing.");
+            eprintln!("Failed to open log.txt for writing.");
         }
     }
-    
+
     if CombinedLogger::init(loggers).is_err() {
         eprintln!("Failed to initialize the logger!");
     }
-    
+
     if verbose_level > 0 {
         //info!("Logging enabled. Level: {:?}.", verbose_level);
     }
 
     let mut all_salts: Vec<String> = Vec::new();
-    if matches.subcommand_matches("extract").is_some() || matches.subcommand_matches("list").is_some() {
+    if matches.subcommand_matches("extract").is_some()
+        || matches.subcommand_matches("list").is_some()
+    {
         all_salts = load_salts();
     }
 
-    let operation_result: Result<()> = if let Some(sub_matches) = matches.subcommand_matches("list") {
+    let operation_result: Result<()> = if let Some(sub_matches) = matches.subcommand_matches("list")
+    {
         let cli_key = sub_matches.get_one::<String>("key").map(|s| s.to_string());
         let input_fname = sub_matches.get_one::<String>("input").unwrap();
         let output_path = sub_matches.get_one::<String>("output").map(|s| s.as_str());
-        
+
         if let Some(key) = cli_key {
             info!("list for: '{}' with specific key.", input_fname);
             list::run_list(input_fname, &key, output_path)
@@ -197,10 +216,16 @@ fn main() {
         }
     } else if let Some(sub_matches) = matches.subcommand_matches("extract") {
         let cli_key = sub_matches.get_one::<String>("key").map(|s| s.to_string());
-        debug!("extract for: '{}' to output: '{}'",
-            sub_matches.get_one::<String>("input").map_or("N/A", |s| s.as_str()),
-            sub_matches.get_one::<String>("output").map_or("N/A", |s| s.as_str()));
-        
+        debug!(
+            "extract for: '{}' to output: '{}'",
+            sub_matches
+                .get_one::<String>("input")
+                .map_or("N/A", |s| s.as_str()),
+            sub_matches
+                .get_one::<String>("output")
+                .map_or("N/A", |s| s.as_str())
+        );
+
         // --- START OF MODIFICATION ---
         // Updated the function call to the new name.
         extract::run_extract_with_key_search(
@@ -208,22 +233,33 @@ fn main() {
             sub_matches.get_one::<String>("output").unwrap(),
             cli_key,
             &all_salts,
-            sub_matches.get_many::<String>("filter").map_or(Vec::new(), |v| v.map(|s| s.as_str()).collect()),
+            sub_matches
+                .get_many::<String>("filter")
+                .map_or(Vec::new(), |v| v.map(|s| s.as_str()).collect()),
         )
         // --- END OF MODIFICATION ---
-
     } else if let Some(sub_matches) = matches.subcommand_matches("pack") {
         if sub_matches.get_flag("additional_data") {
             warn!("DEPRECATED: --additional_data argument is ignored.");
         }
-        info!("pack for: '{}' to output file: '{}'",
-            sub_matches.get_one::<String>("input").map_or("N/A", |s| s.as_str()),
-            sub_matches.get_one::<String>("output").map_or("N/A", |s| s.as_str()));
+        info!(
+            "pack for: '{}' to output file: '{}'",
+            sub_matches
+                .get_one::<String>("input")
+                .map_or("N/A", |s| s.as_str()),
+            sub_matches
+                .get_one::<String>("output")
+                .map_or("N/A", |s| s.as_str())
+        );
         pack::run_pack(
             sub_matches.get_one::<String>("input").unwrap(),
             sub_matches.get_one::<String>("output").unwrap(),
-            sub_matches.get_one::<String>("key").expect("Key is required for pack operation"),
-            sub_matches.get_many::<String>("compress-format").map_or(Vec::new(), |v| v.map(|s| s.as_str()).collect()),
+            sub_matches
+                .get_one::<String>("key")
+                .expect("Key is required for pack operation"),
+            sub_matches
+                .get_many::<String>("compress-format")
+                .map_or(Vec::new(), |v| v.map(|s| s.as_str()).collect()),
         )
     } else {
         info!("No subcommand provided. Use --help for usage information.");
